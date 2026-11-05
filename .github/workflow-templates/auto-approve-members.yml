@@ -1,0 +1,15 @@
+name: Auto-approve org member PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  approve:
+    # Pin to a tag or commit SHA so changes to the central repo are deliberate
+    uses: your-org/shared-workflows/.github/workflows/auto-approve.yml@b2899eb232a2b04258a212d6f7e10da6e8d22b2f
+    with:
+      app-id: ${{ vars.APPROVER_APP_ID }}
+    secrets: inherit
