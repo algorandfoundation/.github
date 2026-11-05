@@ -1,0 +1,52 @@
+name: Auto-approve org member PRs
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: GitHub App ID used to approve
+        type: string
+        required: true
+    secrets:
+      APPROVER_APP_PRIVATE_KEY:
+        required: true
+
+jobs:
+  approve:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.APPROVER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Approve if author is an org member
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            const org = context.repo.owner;
+            const author = pr.user.login;
+
+            try {
+              await github.rest.orgs.checkMembershipForUser({ org, username: author });
+            } catch (err) {
+              if (err.status === 404 || err.status === 302) {
+                core.info(`${author} is not a member of ${org}; skipping.`);
+                return;
+              }
+              throw err;
+            }
+
+            await github.rest.pulls.createReview({
+              ...context.repo,
+              pull_number: pr.number,
+              event: 'APPROVE',
+              body: `Auto-approved: @${author} is a member of ${org}.`,
+            });
+            core.info(`Approved PR #${pr.number} by ${author}.`);
