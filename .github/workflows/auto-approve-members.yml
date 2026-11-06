@@ -1,0 +1,86 @@
+name: Auto-approve org member PRs
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: GitHub App ID used to approve
+        type: string
+        required: true
+    secrets:
+      APPROVER_APP_PRIVATE_KEY:
+        required: true
+
+jobs:
+  approve:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.APPROVER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Approve if author is an org member
+        uses: actions/github-script@v7
+        env:
+          MIN_REQUIRED_APPROVALS: '2'
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const org = owner;
+            const author = pr.user.login;
+            const branch = pr.base.ref;
+            const minRequired = Number(process.env.MIN_REQUIRED_APPROVALS);
+
+            // Safeguard: only approve if the base branch requires at least
+            // `minRequired` approvals, so this bot can never be the sole
+            // approval needed to merge. The effective requirement is the max
+            // across classic branch protection and all active rulesets
+            // (repo + org) that target the branch. Any read failure leaves
+            // the count low, which fails safe (no approval).
+            let classicCount = 0;
+            try {
+              const { data } = await github.rest.repos.getPullRequestReviewProtection({ owner, repo, branch });
+              classicCount = data.required_approving_review_count ?? 0;
+            } catch (err) {
+              // 404: branch unprotected or no PR-review requirement.
+              // 403: app lacks "Administration: read"; treat as unknown (0).
+              if (err.status !== 404 && err.status !== 403) throw err;
+              if (err.status === 403) core.warning('Cannot read classic branch protection (needs Administration: read); ignoring it.');
+            }
+
+            const rules = await github.paginate(github.rest.repos.getBranchRules, { owner, repo, branch, per_page: 100 });
+            const rulesetCount = Math.max(0, ...rules
+              .filter(r => r.type === 'pull_request')
+              .map(r => r.parameters?.required_approving_review_count ?? 0));
+
+            const required = Math.max(classicCount, rulesetCount);
+            core.info(`Required approvals on ${branch}: ${required} (classic=${classicCount}, rulesets=${rulesetCount}).`);
+            if (required < minRequired) {
+              core.warning(`${owner}/${repo}@${branch} requires ${required} approval(s); need >= ${minRequired} to auto-approve. Skipping.`);
+              return;
+            }
+
+            try {
+              await github.rest.orgs.checkMembershipForUser({ org, username: author });
+            } catch (err) {
+              if (err.status === 404 || err.status === 302) {
+                core.info(`${author} is not a member of ${org}; skipping.`);
+                return;
+              }
+              throw err;
+            }
+
+            await github.rest.pulls.createReview({
+              ...context.repo,
+              pull_number: pr.number,
+              event: 'APPROVE',
+              body: `Auto-approved: @${author} is a member of ${org}.`,
+            });
+            core.info(`Approved PR #${pr.number} by ${author}.`);
